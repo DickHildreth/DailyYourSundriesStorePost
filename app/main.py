@@ -14,7 +14,7 @@ import datetime as dt
 import sys
 
 from . import catalog, copywriter, postlog, publisher
-from .selection import choose_product
+from .selection import candidate_tiers as choose_tiers
 from .verify_setup import verify_all
 
 
@@ -44,21 +44,36 @@ def run(dry_run: bool = False, skip_preflight: bool = False) -> int:
     recent = postlog.recent_handles()
     log(f"Recently posted (skip list): {len(recent)} handles.")
 
-    sel = choose_product(products, recent)
-    log(f"Selected (keyword rank): '{sel.product.get('title')}' "
-        f"(tier {sel.tier} — {sel.reason})")
+    tiers = choose_tiers(products, recent)
+    log(f"{len(tiers)} candidate tier(s) to consider.")
 
-    # Let Claude pick the best-fitting product from the tier's shortlist.
-    chosen = sel.product
-    occasion = sel.reason
-    shortlist = sel.shortlist or [sel.product]
-    if len(shortlist) > 1:
-        log(f"Asking Claude to pick best fit among {len(shortlist)} candidates...")
-        idx, fits, why = copywriter.choose_best_product(occasion, shortlist)
-        chosen = shortlist[idx]
-        log(f"Claude chose: '{chosen.get('title')}' (fits={fits}) — {why}")
-        if not fits:
-            log("Claude judged no candidate a strong fit; proceeding with its best pick anyway.")
+    chosen = None
+    occasion = None
+    chosen_tier = None
+    for tier in tiers:
+        shortlist = tier.shortlist or [tier.product]
+        log(f"Tier {tier.tier} — {tier.reason}: {len(shortlist)} candidate(s)"
+            f"{' [occasion]' if tier.is_occasion else ''}.")
+        # Broad (non-occasion) tier with a single candidate: accept without a fit-check.
+        # Occasion tiers ALWAYS get a fit-check, even with one candidate, so a lone
+        # weak holiday match can be rejected rather than forced into a mismatched post.
+        if len(shortlist) == 1 and not tier.is_occasion:
+            chosen, occasion, chosen_tier = shortlist[0], tier.reason, tier.tier
+            log(f"  Single candidate (broad tier), accepting: '{chosen.get('title')}'")
+            break
+        idx, fits, why = copywriter.choose_best_product(tier.reason, shortlist)
+        cand = shortlist[idx]
+        log(f"  Claude: '{cand.get('title')}' fits={fits} — {why}")
+        if fits:
+            chosen, occasion, chosen_tier = cand, tier.reason, tier.tier
+            break
+        log("  No genuine fit for this occasion; advancing to next tier.")
+
+    if chosen is None:
+        log("ERROR: no tier produced a genuine fit; skipping today's post.")
+        return 1
+
+    log(f"Final selection: '{chosen.get('title')}' (tier {chosen_tier} — {occasion})")
 
     log("Generating copy via Anthropic API...")
     message = copywriter.write_post(chosen, occasion)
@@ -73,7 +88,7 @@ def run(dry_run: bool = False, skip_preflight: bool = False) -> int:
     post_id = result.get("id") or result.get("post_id")
     log(f"Published. Post ID: {post_id}")
 
-    postlog.append(chosen["handle"], chosen["title"], sel.tier)
+    postlog.append(chosen["handle"], chosen["title"], chosen_tier)
     log("Logged. Done.")
     return 0
 

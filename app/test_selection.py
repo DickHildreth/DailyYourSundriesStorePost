@@ -34,11 +34,13 @@ def main():
     check("Thanksgiving 2026 = Nov 26", _nth_weekday(2026, 11, 3, 4) == dt.date(2026, 11, 26))
     check("Easter 2026 = Apr 5", _easter(2026) == dt.date(2026, 4, 5))
 
-    # Ladder picks the SOONEST special day: mid-June -> Juneteenth (19th) before Father's (21st)
+    # Commemorative observances (Juneteenth) are excluded from product selection,
+    # so mid-June the next product-appropriate day is Father's Day, not Juneteenth.
     day = upcoming_special_day(dt.date(2026, 6, 15))
-    check("Soonest day mid-June is Juneteenth", day is not None and "Juneteenth" in day[0])
+    check("Mid-June skips Juneteenth (commemorative), finds Father's Day",
+          day is not None and "Father" in day[0])
 
-    # Father's Day is the nearest special day around June 19-21 once Juneteenth passes
+    # Father's Day is the nearest selectable day around June 19-21
     day_f = upcoming_special_day(dt.date(2026, 6, 20))
     check("Father's Day detected Jun 20", day_f is not None and "Father" in day_f[0])
     sel = choose_product(PRODUCTS, set(), today=dt.date(2026, 6, 20), rng=random.Random(1))
@@ -47,6 +49,12 @@ def main():
     # Repeat avoidance: if dad product was recent, it must not be re-selected
     sel2 = choose_product(PRODUCTS, {"dad-keychain"}, today=dt.date(2026, 6, 20), rng=random.Random(1))
     check("Repeat avoidance skips recent dad product", sel2.product["handle"] != "dad-keychain")
+
+    # Commemorative exclusion: Juneteenth never appears in approaching days
+    from .selection import approaching_special_days, COMMEMORATIVE_OBSERVANCES
+    labels = [l for _, l, _ in approaching_special_days(dt.date(2026, 6, 1))]
+    check("Juneteenth excluded from approaching days", "Juneteenth" not in labels)
+    check("Veterans Day is in commemorative set", "Veterans Day" in COMMEMORATIVE_OBSERVANCES)
 
     # No holiday nearby -> falls to month/season; deep winter picks cozy/warm
     midwinter = dt.date(2026, 1, 20)

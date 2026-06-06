@@ -88,9 +88,26 @@ def special_days_for_year(year: int) -> list[tuple[dt.date, str, list[str]]]:
     return days
 
 
+# Commemorative / solemn observances that should NOT be used as a hook to sell a
+# product. Grafting a commercial post onto these reads as opportunistic and can
+# draw backlash, so they're excluded from the product-occasion tiers. (They can
+# still be handled by a separate, non-commercial posting flow if ever desired.)
+COMMEMORATIVE_OBSERVANCES = {
+    "Juneteenth",
+    "Veterans Day",
+    "Memorial Day",
+}
+
+
+def _product_special_days(year: int):
+    """special_days_for_year minus commemorative observances."""
+    return [(d, label, themes) for (d, label, themes) in special_days_for_year(year)
+            if label not in COMMEMORATIVE_OBSERVANCES]
+
+
 def upcoming_special_day(today: dt.date) -> tuple[str, list[str]] | None:
-    """The soonest special day within LOOKAHEAD_DAYS, else None."""
-    candidates = special_days_for_year(today.year) + special_days_for_year(today.year + 1)
+    """The soonest product-appropriate special day within LOOKAHEAD_DAYS, else None."""
+    candidates = _product_special_days(today.year) + _product_special_days(today.year + 1)
     best = None
     for date, label, themes in candidates:
         delta = (date - today).days
@@ -110,7 +127,7 @@ def approaching_special_days(today: dt.date,
     Used to reserve strongly-themed products for an approaching holiday so they
     aren't absorbed into a weakly-matched month/season tier.
     """
-    candidates = special_days_for_year(today.year) + special_days_for_year(today.year + 1)
+    candidates = _product_special_days(today.year) + _product_special_days(today.year + 1)
     out = []
     for date, label, themes in candidates:
         delta = (date - today).days
@@ -263,22 +280,27 @@ class Selection:
     reason: str
     themes: list[str]
     shortlist: list[dict] | None = None  # ranked candidates for this tier (for Claude chooser)
+    is_occasion: bool = False            # True for holiday/month tiers that need a genuine fit
+                                         # even with one candidate; False for broad fallbacks
 
 
 SHORTLIST_SIZE = 6
 
 
-def choose_product(products: list[dict], recent_handles: set[str],
-                   today: dt.date | None = None,
-                   rng: random.Random | None = None) -> Selection:
-    """Walk the priority ladder, skipping products posted recently.
+def candidate_tiers(products: list[dict], recent_handles: set[str],
+                    today: dt.date | None = None,
+                    rng: random.Random | None = None) -> list[Selection]:
+    """Ordered list of viable tiers, each a Selection with a ranked `shortlist`.
 
-    Each returned Selection includes a `shortlist` of the top ranked candidates for
-    the winning tier, so a downstream chooser (Claude) can pick the best fit among
-    them rather than blindly taking the keyword top-rank.
+    The orchestrator walks these in order, asking Claude to pick a genuine fit from
+    each tier's shortlist; if Claude judges a tier has no good fit, it advances to the
+    next tier. Commemorative observances are already excluded from the holiday tiers.
+    The final season/evergreen tiers are broad, so the chain reliably terminates in a
+    genuine fit rather than ever forcing a mismatched occasion post.
     """
     today = today or dt.date.today()
     rng = rng or random.Random()
+    tiers: list[Selection] = []
 
     def fresh_only(prods: list[dict], reserve_check: bool = False) -> list[dict]:
         out = []
@@ -290,55 +312,67 @@ def choose_product(products: list[dict], recent_handles: set[str],
             out.append(p)
         return out
 
-    def first_fresh(matched: list[dict], reserve_check: bool = False) -> dict | None:
-        fr = fresh_only(matched, reserve_check)
-        return fr[0] if fr else None
-
-    # Tier 1a — imminent special day (within LOOKAHEAD_DAYS): leads the post.
+    # Tier 1a — imminent special day
     day = upcoming_special_day(today)
     if day:
         label, themes = day
         cands = fresh_only(match_products(products, themes))
         if cands:
-            return Selection(cands[0], 1, f"Upcoming special day: {label}", themes,
-                             shortlist=cands[:SHORTLIST_SIZE])
+            tiers.append(Selection(cands[0], 1, f"Upcoming special day: {label}",
+                                   themes, shortlist=cands[:SHORTLIST_SIZE],
+                                   is_occasion=True))
 
-    # Tier 1b — approaching holiday (within APPROACHING_DAYS) for which a product is
-    # a STRONG thematic match. This claims e.g. a Father's Day keychain for Father's
-    # Day even before the imminent window, instead of letting a weak keyword pull it
-    # into the current month tier.
+    # Tier 1b — approaching holiday with a STRONG product match
     for _delta, label, themes in approaching_special_days(today):
         scored = match_products_scored(products, themes)
         strong = [p for p, s in scored
                   if s >= STRONG_MATCH_MIN and p.get("handle") not in recent_handles]
         if strong:
-            return Selection(strong[0], 1, f"Approaching special day: {label}", themes,
-                             shortlist=strong[:SHORTLIST_SIZE])
+            tiers.append(Selection(strong[0], 1, f"Approaching special day: {label}",
+                                   themes, shortlist=strong[:SHORTLIST_SIZE],
+                                   is_occasion=True))
+            break  # only the soonest approaching holiday
 
-    # Tier 2 — special month (skipping products reserved for an approaching holiday)
+    # Tier 2 — special month
     mlabel, mthemes = month_theme(today)
     mcands = fresh_only(match_products(products, mthemes), reserve_check=True)
     if mcands:
-        return Selection(mcands[0], 2, f"Special month: {mlabel}", mthemes,
-                         shortlist=mcands[:SHORTLIST_SIZE])
+        tiers.append(Selection(mcands[0], 2, f"Special month: {mlabel}", mthemes,
+                               shortlist=mcands[:SHORTLIST_SIZE], is_occasion=True))
 
-    # Tier 3 — season (also reserving approaching-holiday products)
+    # Tier 3 — season (broad; a genuine fit is easy, auto-accept allowed)
     slabel, sthemes = season_theme(today)
     scands = fresh_only(match_products(products, sthemes), reserve_check=True)
     if scands:
-        return Selection(scands[0], 3, f"Seasonal fit: {slabel}", sthemes,
-                         shortlist=scands[:SHORTLIST_SIZE])
+        tiers.append(Selection(scands[0], 3, f"Seasonal fit: {slabel}", sthemes,
+                               shortlist=scands[:SHORTLIST_SIZE], is_occasion=False))
 
-    # Tier 4 — random evergreen; try a few categories before giving up
+    # Tier 4 — random evergreen (broad category)
     for _ in range(len(EVERGREEN)):
         cat, themes = random_evergreen(rng)
         ecands = fresh_only(match_products(products, themes), reserve_check=True)
         if ecands:
-            return Selection(ecands[0], 4, f"Random evergreen: {cat}", themes,
-                             shortlist=ecands[:SHORTLIST_SIZE])
+            tiers.append(Selection(ecands[0], 4, f"Random evergreen: {cat}", themes,
+                                   shortlist=ecands[:SHORTLIST_SIZE], is_occasion=False))
+            break
 
-    # Absolute fallback: any fresh product at random
+    # Absolute fallback — any fresh product
     fresh = [p for p in products if p.get("handle") not in recent_handles]
     pool = fresh or products
-    pick = rng.choice(pool)
-    return Selection(pick, 4, "Fallback: random product", [], shortlist=[pick])
+    if pool:
+        sample = rng.sample(pool, min(SHORTLIST_SIZE, len(pool)))
+        tiers.append(Selection(sample[0], 4, "General catalog pick", [],
+                               shortlist=sample, is_occasion=False))
+    return tiers
+
+
+def choose_product(products: list[dict], recent_handles: set[str],
+                   today: dt.date | None = None,
+                   rng: random.Random | None = None) -> Selection:
+    """Convenience: the top viable tier (keyword-ranked, no Claude judgment).
+
+    Kept for tests and simple callers. The orchestrator uses candidate_tiers() so it
+    can cascade past tiers Claude judges to have no genuine fit.
+    """
+    tiers = candidate_tiers(products, recent_handles, today, rng)
+    return tiers[0]
