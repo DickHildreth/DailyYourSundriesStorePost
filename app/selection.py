@@ -17,7 +17,10 @@ from dataclasses import dataclass
 
 LOOKAHEAD_DAYS = 10        # "imminent" — a holiday this close leads the post
 APPROACHING_DAYS = 30      # "approaching" — strongly-themed products are reserved for it
-STRONG_MATCH_MIN = 2       # >= this many theme-keyword hits == a strong thematic signal
+# With weighted scoring (title/tags = 3 each, type = 2, desc = 1), a STRONG signal
+# means at least a title/tag-level hit plus a bit more — not just generic description
+# keywords. 4 requires e.g. a tag hit (3) + a description echo (1), or two field hits.
+STRONG_MATCH_MIN = 4
 
 
 # ---------------------------------------------------------------------------
@@ -188,18 +191,50 @@ def _haystack(product: dict) -> str:
     return " ".join(parts).lower()
 
 
+# Field weights: a product IS what its title/tags say; the description is marketing
+# prose where generic keywords ("gift", "him", "tool") accumulate incidentally.
+WEIGHT_TITLE = 3
+WEIGHT_TAGS = 3
+WEIGHT_TYPE = 2
+WEIGHT_DESC = 1
+
+
+def weighted_theme_score(product: dict, themes: list[str]) -> int:
+    """Score theme matches, weighting title/tags far above the description.
+
+    A keyword in the title or tags counts much more than the same word buried in a
+    long description, so 'Dad Is My Hero Keychain' (dad in title+tags) outranks a
+    'Diamond Hardness Tester' that only mentions 'gift for him' in its blurb.
+    """
+    title = (product.get("title") or "").lower()
+    tags = " ".join(product.get("tags") or []).lower()
+    ptype = (product.get("type") or "").lower()
+    desc = (product.get("description") or "").lower()
+    score = 0
+    for kw in themes:
+        k = kw.lower()
+        if k in title:
+            score += WEIGHT_TITLE
+        if k in tags:
+            score += WEIGHT_TAGS
+        if k in ptype:
+            score += WEIGHT_TYPE
+        if k in desc:
+            score += WEIGHT_DESC
+    return score
+
+
 def match_products(products: list[dict], themes: list[str]) -> list[dict]:
-    """Products whose text matches any theme keyword, scored by match count."""
+    """Products whose text matches any theme keyword, best (weighted) first."""
     return [p for p, _ in match_products_scored(products, themes)]
 
 
 def match_products_scored(products: list[dict],
                           themes: list[str]) -> list[tuple[dict, int]]:
-    """(product, score) for products matching any theme keyword, best first."""
+    """(product, weighted_score) for matching products, best first."""
     scored = []
     for p in products:
-        hay = _haystack(p)
-        score = sum(1 for kw in themes if kw.lower() in hay)
+        score = weighted_theme_score(p, themes)
         if score > 0:
             scored.append((p, score))
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -207,8 +242,7 @@ def match_products_scored(products: list[dict],
 
 
 def theme_score(product: dict, themes: list[str]) -> int:
-    hay = _haystack(product)
-    return sum(1 for kw in themes if kw.lower() in hay)
+    return weighted_theme_score(product, themes)
 
 
 def strong_holiday_affinity(product: dict, today: dt.date) -> str | None:
@@ -217,7 +251,7 @@ def strong_holiday_affinity(product: dict, today: dt.date) -> str | None:
     under a loosely-matched Pride Month theme when Father's Day is still weeks out.
     """
     for _delta, label, themes in approaching_special_days(today):
-        if theme_score(product, themes) >= STRONG_MATCH_MIN:
+        if weighted_theme_score(product, themes) >= STRONG_MATCH_MIN:
             return label
     return None
 
@@ -228,34 +262,46 @@ class Selection:
     tier: int
     reason: str
     themes: list[str]
+    shortlist: list[dict] | None = None  # ranked candidates for this tier (for Claude chooser)
+
+
+SHORTLIST_SIZE = 6
 
 
 def choose_product(products: list[dict], recent_handles: set[str],
                    today: dt.date | None = None,
                    rng: random.Random | None = None) -> Selection:
-    """Walk the priority ladder, skipping products posted recently."""
+    """Walk the priority ladder, skipping products posted recently.
+
+    Each returned Selection includes a `shortlist` of the top ranked candidates for
+    the winning tier, so a downstream chooser (Claude) can pick the best fit among
+    them rather than blindly taking the keyword top-rank.
+    """
     today = today or dt.date.today()
     rng = rng or random.Random()
 
-    def first_fresh(matched: list[dict],
-                    reserve_check: bool = False) -> dict | None:
-        """First fresh product. If reserve_check, skip products that strongly
-        belong to an approaching holiday (they're reserved for the holiday tier)."""
-        for p in matched:
+    def fresh_only(prods: list[dict], reserve_check: bool = False) -> list[dict]:
+        out = []
+        for p in prods:
             if p.get("handle") in recent_handles:
                 continue
             if reserve_check and strong_holiday_affinity(p, today):
                 continue
-            return p
-        return None
+            out.append(p)
+        return out
+
+    def first_fresh(matched: list[dict], reserve_check: bool = False) -> dict | None:
+        fr = fresh_only(matched, reserve_check)
+        return fr[0] if fr else None
 
     # Tier 1a — imminent special day (within LOOKAHEAD_DAYS): leads the post.
     day = upcoming_special_day(today)
     if day:
         label, themes = day
-        pick = first_fresh(match_products(products, themes))
-        if pick:
-            return Selection(pick, 1, f"Upcoming special day: {label}", themes)
+        cands = fresh_only(match_products(products, themes))
+        if cands:
+            return Selection(cands[0], 1, f"Upcoming special day: {label}", themes,
+                             shortlist=cands[:SHORTLIST_SIZE])
 
     # Tier 1b — approaching holiday (within APPROACHING_DAYS) for which a product is
     # a STRONG thematic match. This claims e.g. a Father's Day keychain for Father's
@@ -266,29 +312,33 @@ def choose_product(products: list[dict], recent_handles: set[str],
         strong = [p for p, s in scored
                   if s >= STRONG_MATCH_MIN and p.get("handle") not in recent_handles]
         if strong:
-            return Selection(strong[0], 1, f"Approaching special day: {label}", themes)
+            return Selection(strong[0], 1, f"Approaching special day: {label}", themes,
+                             shortlist=strong[:SHORTLIST_SIZE])
 
     # Tier 2 — special month (skipping products reserved for an approaching holiday)
     mlabel, mthemes = month_theme(today)
-    pick = first_fresh(match_products(products, mthemes), reserve_check=True)
-    if pick:
-        return Selection(pick, 2, f"Special month: {mlabel}", mthemes)
+    mcands = fresh_only(match_products(products, mthemes), reserve_check=True)
+    if mcands:
+        return Selection(mcands[0], 2, f"Special month: {mlabel}", mthemes,
+                         shortlist=mcands[:SHORTLIST_SIZE])
 
     # Tier 3 — season (also reserving approaching-holiday products)
     slabel, sthemes = season_theme(today)
-    pick = first_fresh(match_products(products, sthemes), reserve_check=True)
-    if pick:
-        return Selection(pick, 3, f"Seasonal fit: {slabel}", sthemes)
+    scands = fresh_only(match_products(products, sthemes), reserve_check=True)
+    if scands:
+        return Selection(scands[0], 3, f"Seasonal fit: {slabel}", sthemes,
+                         shortlist=scands[:SHORTLIST_SIZE])
 
     # Tier 4 — random evergreen; try a few categories before giving up
     for _ in range(len(EVERGREEN)):
         cat, themes = random_evergreen(rng)
-        pick = first_fresh(match_products(products, themes), reserve_check=True)
-        if pick:
-            return Selection(pick, 4, f"Random evergreen: {cat}", themes)
+        ecands = fresh_only(match_products(products, themes), reserve_check=True)
+        if ecands:
+            return Selection(ecands[0], 4, f"Random evergreen: {cat}", themes,
+                             shortlist=ecands[:SHORTLIST_SIZE])
 
     # Absolute fallback: any fresh product at random
     fresh = [p for p in products if p.get("handle") not in recent_handles]
     pool = fresh or products
     pick = rng.choice(pool)
-    return Selection(pick, 4, "Fallback: random product", [])
+    return Selection(pick, 4, "Fallback: random product", [], shortlist=[pick])

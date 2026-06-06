@@ -45,10 +45,23 @@ def run(dry_run: bool = False, skip_preflight: bool = False) -> int:
     log(f"Recently posted (skip list): {len(recent)} handles.")
 
     sel = choose_product(products, recent)
-    log(f"Selected: '{sel.product.get('title')}' (tier {sel.tier} — {sel.reason})")
+    log(f"Selected (keyword rank): '{sel.product.get('title')}' "
+        f"(tier {sel.tier} — {sel.reason})")
+
+    # Let Claude pick the best-fitting product from the tier's shortlist.
+    chosen = sel.product
+    occasion = sel.reason
+    shortlist = sel.shortlist or [sel.product]
+    if len(shortlist) > 1:
+        log(f"Asking Claude to pick best fit among {len(shortlist)} candidates...")
+        idx, fits, why = copywriter.choose_best_product(occasion, shortlist)
+        chosen = shortlist[idx]
+        log(f"Claude chose: '{chosen.get('title')}' (fits={fits}) — {why}")
+        if not fits:
+            log("Claude judged no candidate a strong fit; proceeding with its best pick anyway.")
 
     log("Generating copy via Anthropic API...")
-    message = copywriter.write_post(sel.product, sel.reason)
+    message = copywriter.write_post(chosen, occasion)
     log("Copy generated:\n" + "-" * 60 + f"\n{message}\n" + "-" * 60)
 
     if dry_run:
@@ -56,11 +69,11 @@ def run(dry_run: bool = False, skip_preflight: bool = False) -> int:
         return 0
 
     log("Publishing to Facebook...")
-    result = publisher.publish_link_post(message, sel.product["url"])
+    result = publisher.publish_link_post(message, chosen["url"])
     post_id = result.get("id") or result.get("post_id")
     log(f"Published. Post ID: {post_id}")
 
-    postlog.append(sel.product["handle"], sel.product["title"], sel.tier)
+    postlog.append(chosen["handle"], chosen["title"], sel.tier)
     log("Logged. Done.")
     return 0
 

@@ -57,6 +57,73 @@ Product details (use only what's here for facts):
 """
 
 
+CHOOSER_SYSTEM_PROMPT = """You are selecting which single product best fits a given occasion \
+for a daily Facebook post by "Your Sundries Store". You are given the occasion and a numbered \
+shortlist of candidate products. Pick the ONE product that most genuinely and naturally fits \
+the occasion — something a real shopper would find fitting, not a stretch.
+
+Reject forced fits. A heartfelt keepsake or a clearly dad-oriented item fits Father's Day; a \
+niche technical tool does NOT, even if its description mentions "gift". Prefer products whose \
+TITLE and purpose match the occasion, not ones that merely contain a keyword.
+
+Respond with ONLY a JSON object, no other text:
+{"index": <number of the chosen product>, "fits": <true|false>, "why": "<short reason>"}
+
+Set "fits" to false if NONE of the candidates is a good occasion fit (the caller will then \
+fall back to a general selection). Still provide your best "index" even when fits is false."""
+
+
+def _build_chooser_prompt(occasion: str, candidates: list[dict]) -> str:
+    lines = [f"Occasion: {occasion}", "", "Candidate products:"]
+    for i, p in enumerate(candidates):
+        tags = ", ".join((p.get("tags") or [])[:10])
+        lines.append(
+            f"{i}. {p.get('title')} | type: {p.get('type')} | tags: {tags} | "
+            f"desc: {(p.get('description') or '')[:160]}"
+        )
+    return "\n".join(lines)
+
+
+def choose_best_product(occasion: str, candidates: list[dict], *,
+                        api_key: str | None = None) -> tuple[int, bool, str]:
+    """Ask Claude which candidate best fits the occasion.
+
+    Returns (index, fits, why). On any API/parse failure, returns (0, True, "fallback")
+    so the caller can proceed with the top-ranked candidate rather than crash.
+    """
+    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key or not candidates:
+        return 0, True, "no api key or no candidates; using top-ranked"
+
+    body = json.dumps({
+        "model": MODEL,
+        "max_tokens": 200,
+        "system": CHOOSER_SYSTEM_PROMPT,
+        "messages": [{"role": "user",
+                      "content": _build_chooser_prompt(occasion, candidates)}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        API_URL, data=body, method="POST",
+        headers={"content-type": "application/json", "x-api-key": api_key,
+                 "anthropic-version": ANTHROPIC_VERSION},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        text = "".join(b.get("text", "") for b in data.get("content", [])
+                       if b.get("type") == "text").strip()
+        # Strip code fences if present
+        text = text.replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(text)
+        idx = int(parsed.get("index", 0))
+        if not (0 <= idx < len(candidates)):
+            idx = 0
+        return idx, bool(parsed.get("fits", True)), str(parsed.get("why", ""))[:200]
+    except Exception:
+        # Any failure: don't block the run; use the top-ranked candidate.
+        return 0, True, "chooser failed; using top-ranked"
+
+
 def write_post(product: dict, occasion_reason: str, *, api_key: str | None = None,
                max_tokens: int = 600) -> str:
     api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
