@@ -34,7 +34,7 @@ def _get_json(url: str, timeout: int = 30) -> dict:
 
 
 def check_facebook() -> tuple[bool, list[str]]:
-    """Validate the page token: valid, non-expiring, CREATE_CONTENT on the page."""
+    """Validate the page token: valid, non-expiring, and bound to the target page."""
     out: list[str] = []
     page_id = os.environ.get("FB_PAGE_ID")
     token = os.environ.get("FB_PAGE_ACCESS_TOKEN")
@@ -68,25 +68,37 @@ def check_facebook() -> tuple[bool, list[str]]:
         out.append(f"FB: token EXPIRES (expires_at={expires}, data_access_expires_at={data_expires}) — "
                    "regenerate as a System User token with expiration Never")
 
-    # Confirm the token's page matches and has CREATE_CONTENT.
-    # Query the page node for the tasks this token can perform.
-    try:
-        page = _get_json(
-            f"{GRAPH}/{GRAPH_VERSION}/{page_id}?fields=name,tasks&"
-            + urllib.parse.urlencode({"access_token": token})
-        )
-    except urllib.error.HTTPError as e:
-        return False, out + [f"FB: page query HTTP {e.code}: {e.read().decode('utf-8','replace')[:200]}"]
-    except urllib.error.URLError as e:
-        return False, out + [f"FB: cannot reach page node: {e}"]
-
-    tasks = page.get("tasks") or []
-    if "CREATE_CONTENT" in tasks:
-        out.append(f"FB: CREATE_CONTENT granted on '{page.get('name')}' \u2713")
-    else:
+    # Confirm this token actually belongs to the target page.
+    # A Page access token's debug_token data includes type == "PAGE" and a
+    # profile_id equal to the page id. (The `tasks` field is only returned when
+    # listing pages via a USER token, e.g. /me/accounts — querying the page node
+    # with the page token itself does NOT expose `tasks`, so we don't ask for it.)
+    tok_type = data.get("type")
+    profile_id = str(data.get("profile_id") or "")
+    if tok_type == "PAGE" and profile_id == str(page_id):
+        out.append(f"FB: page token bound to page {page_id} (type PAGE) \u2713")
+    elif tok_type == "PAGE" and profile_id and profile_id != str(page_id):
         ok = False
-        out.append(f"FB: CREATE_CONTENT NOT in tasks for page (got {tasks}) — "
-                   "reassign the page to the System User with full control")
+        out.append(f"FB: token is for page {profile_id}, but FB_PAGE_ID is {page_id} — mismatch")
+    elif tok_type and tok_type != "PAGE":
+        ok = False
+        out.append(f"FB: token type is {tok_type}, expected PAGE — use the System User PAGE token")
+    else:
+        # Fallback: some responses omit type/profile_id; do a lightweight name fetch
+        # to confirm the token can read the page node at all.
+        try:
+            page = _get_json(
+                f"{GRAPH}/{GRAPH_VERSION}/{page_id}?fields=name&"
+                + urllib.parse.urlencode({"access_token": token})
+            )
+            out.append(f"FB: token can access page '{page.get('name')}' \u2713")
+        except urllib.error.HTTPError as e:
+            ok = False
+            out.append(f"FB: cannot access page {page_id}: HTTP {e.code} "
+                       f"{e.read().decode('utf-8','replace')[:160]}")
+        except urllib.error.URLError as e:
+            ok = False
+            out.append(f"FB: cannot reach page node: {e}")
     return ok, out
 
 

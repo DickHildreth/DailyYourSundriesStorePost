@@ -8,5 +8,14 @@ COPY app ./app
 ENV POST_LOG_PATH=/data/post-log.jsonl
 RUN mkdir -p /data
 
-# Default command runs one post. The scheduler invokes this once per day.
+# IMPORTANT — deployment shape:
+# This image is deployed in Coolify as a long-running resource, but it must NOT
+# post on startup. If the entrypoint ran `python -m app.main`, the container would
+# post once, exit, and Coolify would restart it in a tight loop — posting every few
+# seconds. So the resident container simply idles. The actual daily post is run by a
+# Coolify *Scheduled Task* that executes `python -m app.main` inside this container
+# once per day (e.g. cron `0 9 * * *`).
+#
+# To run the post manually (verify / dry-run / one real post), exec into the
+# container:  python -m app.verify_setup   |   python -m app.main --dry-run   |   python -m app.main
 ENTRYPOINT ["sleep", "infinity"]

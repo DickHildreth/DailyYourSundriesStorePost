@@ -57,20 +57,34 @@ python -m app.main          # real: publishes and logs
 
 ## Deploy on Coolify
 
-1. **New Resource → Docker Compose** (or Dockerfile), pointed at this repo/folder.
-2. **Environment variables:** add the five above in Coolify's env UI. Mark
-   `FB_PAGE_ACCESS_TOKEN` and `ANTHROPIC_API_KEY` as secrets.
-3. **Persistent volume:** the compose file declares a named volume `sundries_data`
-   mounted at `/data`. Coolify will create it. This is what makes the 14-day repeat-avoidance
-   log survive restarts/redeploys. If you configure storage manually in the Coolify UI instead,
-   add a **Persistent Storage** entry mapping a volume to `/data`.
-4. **Timezone:** set `TZ` (e.g. `America/Denver`) as an env var — the container's clock drives
-   both the "upcoming holiday within 10 days" logic and the scheduled run time. Without it the
-   container defaults to UTC and the date math will be off by your offset.
-5. **Schedule:** use Coolify's **Scheduled Tasks** for this resource. Add a task with:
-   - **Command:** `python -m app.main`
-   - **Frequency (cron):** e.g. `0 9 * * *` for 9:00 AM daily (in the container's TZ)
-   The container runs, posts once, logs, and exits. `restart: "no"` keeps it from looping.
+> **Deployment shape (read this first).** This is a run-once job, not a web service.
+> The container is deployed as a long-running resource that **idles** (`sleep infinity`),
+> and a **Scheduled Task** runs `python -m app.main` inside it once a day. The entrypoint
+> deliberately does NOT post on startup — if it did, Coolify would restart the exited
+> container in a tight loop and post every few seconds. Do not change the entrypoint back
+> to `app.main`.
+
+1. **New Resource → Public Repository**, URL `https://github.com/DickHildreth/DailyYourSundriesStorePost`, branch `main`.
+2. **Build Pack: Dockerfile.** Base Directory `/`, Dockerfile Location `/Dockerfile`.
+3. **No domain** — leave Domains blank, don't generate one. This isn't a web service.
+4. **Disable Healthcheck** (Healthcheck tab). The container idles; no HTTP endpoint to check.
+5. **Environment variables:** add the five (below). Mark `FB_PAGE_ACCESS_TOKEN` and
+   `ANTHROPIC_API_KEY` as secrets.
+6. **Persistent volume:** add a Persistent Storage entry mapping a volume to `/data`
+   (keeps the 14-day repeat-avoidance log across redeploys).
+7. **Timezone:** set `TZ` (e.g. `America/Denver`) — drives the holiday/season date math and
+   the scheduled run time. Without it the container is UTC.
+8. **Deploy.** The container starts and idles. **Nothing posts yet** — this is correct.
+9. **Verify before scheduling.** Open the resource **Terminal** (or exec in) and run:
+   ```
+   python -m app.verify_setup     # checks token, API key, catalog — no posting
+   python -m app.main --dry-run   # selects + writes copy, still no posting
+   ```
+   Only when both look right, optionally run one real post: `python -m app.main`.
+10. **Scheduled Task:** on the resource's **Scheduled Tasks** tab, add:
+    - **Command:** `python -m app.main`
+    - **Frequency (cron):** `0 9 * * *` (9 AM daily, container TZ)
+    Coolify runs that command inside the idling container once a day. That is the daily post.
 
 ### Verifying after deploy
 - **Every real run does a pre-flight check first** (FB token valid + non-expiring + CREATE_CONTENT,
