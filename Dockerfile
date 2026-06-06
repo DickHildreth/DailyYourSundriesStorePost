@@ -9,4 +9,4 @@ ENV POST_LOG_PATH=/data/post-log.jsonl
 RUN mkdir -p /data
 
 # Default command runs one post. The scheduler invokes this once per day.
-ENTRYPOINT ["python", "-m", "app.main"]
+ENTRYPOINT ["sleep", "infinity"]
