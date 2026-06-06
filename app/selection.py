@@ -15,7 +15,9 @@ import random
 import re
 from dataclasses import dataclass
 
-LOOKAHEAD_DAYS = 10
+LOOKAHEAD_DAYS = 10        # "imminent" — a holiday this close leads the post
+APPROACHING_DAYS = 30      # "approaching" — strongly-themed products are reserved for it
+STRONG_MATCH_MIN = 2       # >= this many theme-keyword hits == a strong thematic signal
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +99,24 @@ def upcoming_special_day(today: dt.date) -> tuple[str, list[str]] | None:
     return None
 
 
+def approaching_special_days(today: dt.date,
+                             horizon: int = APPROACHING_DAYS
+                             ) -> list[tuple[int, str, list[str]]]:
+    """All special days within `horizon` days, soonest first.
+
+    Used to reserve strongly-themed products for an approaching holiday so they
+    aren't absorbed into a weakly-matched month/season tier.
+    """
+    candidates = special_days_for_year(today.year) + special_days_for_year(today.year + 1)
+    out = []
+    for date, label, themes in candidates:
+        delta = (date - today).days
+        if 0 <= delta <= horizon:
+            out.append((delta, label, themes))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Special months
 # ---------------------------------------------------------------------------
@@ -170,14 +190,36 @@ def _haystack(product: dict) -> str:
 
 def match_products(products: list[dict], themes: list[str]) -> list[dict]:
     """Products whose text matches any theme keyword, scored by match count."""
+    return [p for p, _ in match_products_scored(products, themes)]
+
+
+def match_products_scored(products: list[dict],
+                          themes: list[str]) -> list[tuple[dict, int]]:
+    """(product, score) for products matching any theme keyword, best first."""
     scored = []
     for p in products:
         hay = _haystack(p)
         score = sum(1 for kw in themes if kw.lower() in hay)
         if score > 0:
-            scored.append((score, p))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [p for _, p in scored]
+            scored.append((p, score))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored
+
+
+def theme_score(product: dict, themes: list[str]) -> int:
+    hay = _haystack(product)
+    return sum(1 for kw in themes if kw.lower() in hay)
+
+
+def strong_holiday_affinity(product: dict, today: dt.date) -> str | None:
+    """If the product STRONGLY matches an approaching holiday, return that holiday's
+    label; else None. Used to keep e.g. a Father's Day keychain from being posted
+    under a loosely-matched Pride Month theme when Father's Day is still weeks out.
+    """
+    for _delta, label, themes in approaching_special_days(today):
+        if theme_score(product, themes) >= STRONG_MATCH_MIN:
+            return label
+    return None
 
 
 @dataclass
@@ -195,13 +237,19 @@ def choose_product(products: list[dict], recent_handles: set[str],
     today = today or dt.date.today()
     rng = rng or random.Random()
 
-    def first_fresh(matched: list[dict]) -> dict | None:
+    def first_fresh(matched: list[dict],
+                    reserve_check: bool = False) -> dict | None:
+        """First fresh product. If reserve_check, skip products that strongly
+        belong to an approaching holiday (they're reserved for the holiday tier)."""
         for p in matched:
-            if p.get("handle") not in recent_handles:
-                return p
+            if p.get("handle") in recent_handles:
+                continue
+            if reserve_check and strong_holiday_affinity(p, today):
+                continue
+            return p
         return None
 
-    # Tier 1 — special day
+    # Tier 1a — imminent special day (within LOOKAHEAD_DAYS): leads the post.
     day = upcoming_special_day(today)
     if day:
         label, themes = day
@@ -209,22 +257,33 @@ def choose_product(products: list[dict], recent_handles: set[str],
         if pick:
             return Selection(pick, 1, f"Upcoming special day: {label}", themes)
 
-    # Tier 2 — special month
+    # Tier 1b — approaching holiday (within APPROACHING_DAYS) for which a product is
+    # a STRONG thematic match. This claims e.g. a Father's Day keychain for Father's
+    # Day even before the imminent window, instead of letting a weak keyword pull it
+    # into the current month tier.
+    for _delta, label, themes in approaching_special_days(today):
+        scored = match_products_scored(products, themes)
+        strong = [p for p, s in scored
+                  if s >= STRONG_MATCH_MIN and p.get("handle") not in recent_handles]
+        if strong:
+            return Selection(strong[0], 1, f"Approaching special day: {label}", themes)
+
+    # Tier 2 — special month (skipping products reserved for an approaching holiday)
     mlabel, mthemes = month_theme(today)
-    pick = first_fresh(match_products(products, mthemes))
+    pick = first_fresh(match_products(products, mthemes), reserve_check=True)
     if pick:
         return Selection(pick, 2, f"Special month: {mlabel}", mthemes)
 
-    # Tier 3 — season
+    # Tier 3 — season (also reserving approaching-holiday products)
     slabel, sthemes = season_theme(today)
-    pick = first_fresh(match_products(products, sthemes))
+    pick = first_fresh(match_products(products, sthemes), reserve_check=True)
     if pick:
         return Selection(pick, 3, f"Seasonal fit: {slabel}", sthemes)
 
     # Tier 4 — random evergreen; try a few categories before giving up
     for _ in range(len(EVERGREEN)):
         cat, themes = random_evergreen(rng)
-        pick = first_fresh(match_products(products, themes))
+        pick = first_fresh(match_products(products, themes), reserve_check=True)
         if pick:
             return Selection(pick, 4, f"Random evergreen: {cat}", themes)
 

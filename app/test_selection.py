@@ -58,6 +58,29 @@ def main():
     matched = match_products(PRODUCTS, ["dog", "pet"])
     check("Pet themes match the tumbler", matched and matched[0]["handle"] == "dog-tumbler")
 
+    # NEW: strongly-themed holiday product is claimed by the approaching-holiday tier,
+    # not absorbed into a weakly-matched month. June 5 -> Father's Day ~16 days out
+    # (approaching, not imminent). The dad keychain strongly matches Father's Day.
+    june5 = dt.date(2026, 6, 5)
+    sel_dad = choose_product(PRODUCTS, set(), today=june5, rng=random.Random(3))
+    check("June 5: dad product claimed for approaching Father's Day (tier 1)",
+          sel_dad.tier == 1 and sel_dad.product["handle"] == "dad-keychain"
+          and "Father" in sel_dad.reason)
+
+    # NEW: with the dad product recently posted, June 5 should fall through to a
+    # month/season pick that is NOT the reserved dad product.
+    sel_other = choose_product(PRODUCTS, {"dad-keychain"}, today=june5, rng=random.Random(3))
+    check("June 5: with dad posted, falls to non-dad product",
+          sel_other.product["handle"] != "dad-keychain")
+
+    # NEW: strong_holiday_affinity detects the dad keychain near Father's Day
+    from .selection import strong_holiday_affinity
+    aff = strong_holiday_affinity(PRODUCTS[0], june5)
+    check("Affinity: dad keychain -> Father's Day", aff is not None and "Father" in aff)
+    # and does NOT flag the unrelated blanket
+    aff2 = strong_holiday_affinity(PRODUCTS[3], june5)
+    check("Affinity: blanket has no approaching-holiday affinity", aff2 is None)
+
     print("\nAll selection tests passed.")
 
 
