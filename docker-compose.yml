@@ -1,0 +1,21 @@
+services:
+  sundries-autopost:
+    build: .
+    image: sundries-autopost:latest
+    container_name: sundries-autopost
+    environment:
+      # Set these in Coolify's environment-variable UI (do not commit real values):
+      FB_PAGE_ID: ${FB_PAGE_ID}
+      FB_PAGE_ACCESS_TOKEN: ${FB_PAGE_ACCESS_TOKEN}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      POST_LOG_PATH: /data/post-log.jsonl
+      TZ: ${TZ:-America/Denver}
+    volumes:
+      - sundries_data:/data
+    # This container is run on a schedule, not kept alive. Coolify's Scheduled
+    # Tasks feature should invoke the run (see README). If you instead want it to
+    # exit cleanly after one run when started manually, that's the default ENTRYPOINT.
+    restart: "no"
+
+volumes:
+  sundries_data:
