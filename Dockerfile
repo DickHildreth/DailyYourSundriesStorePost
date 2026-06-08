@@ -1,6 +1,12 @@
 FROM python:3.12-slim
 
-# No third-party deps — the app uses only the Python stdlib.
+# tzdata lets the container honor the TZ env var (e.g. America/Denver). Without it,
+# the slim image can't resolve named timezones and silently stays on UTC — which
+# skews both the scheduled run time and the holiday "days until" date math.
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+# No third-party Python deps — the app uses only the stdlib.
 WORKDIR /app
 COPY app ./app
 

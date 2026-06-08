@@ -14,6 +14,7 @@ Importable: verify_all() returns (ok: bool, lines: list[str]).
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import os
 import sys
@@ -152,9 +153,28 @@ def verify_all() -> tuple[bool, list[str]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+def time_report() -> list[str]:
+    """Report the container's local time + tz so you can confirm TZ took effect."""
+    import time as _time
+    now = dt.datetime.now()
+    utcnow = dt.datetime.now(dt.timezone.utc)
+    tzname = _time.tzname[0] if _time.tzname else "?"
+    tz_env = os.environ.get("TZ", "(unset)")
+    offset_hrs = round((now - utcnow.replace(tzinfo=None)).total_seconds() / 3600)
+    return [
+        f"Time: container local {now.strftime('%Y-%m-%d %H:%M')} ({tzname}, "
+        f"UTC offset {offset_hrs:+d}h); TZ env = {tz_env}",
+        f"Time: if TZ is correct, the date above should match your local date — "
+        f"holiday math uses this clock.",
+    ]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
     ap.add_argument("--quiet", action="store_true", help="only print on failure")
     args = ap.parse_args()
     ok, lines = verify_all()
+    lines = time_report() + lines
     if not ok or not args.quiet:
         print("\n".join(lines))
         print("RESULT:", "ALL CHECKS PASSED" if ok else "FAILED")
