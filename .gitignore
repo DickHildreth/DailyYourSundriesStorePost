@@ -3,6 +3,8 @@ node_modules/
 .output/
 dist/
 *.local
+*.docx
+*.odt
 .env
 .env.example
 .DS_Store
