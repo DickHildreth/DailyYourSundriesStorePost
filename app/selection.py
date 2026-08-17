@@ -15,8 +15,11 @@ import random
 import re
 from dataclasses import dataclass
 
+from . import postlog
+
 LOOKAHEAD_DAYS = 10        # "imminent" — a holiday this close leads the post
 APPROACHING_DAYS = 30      # "approaching" — strongly-themed products are reserved for it
+CATEGORY_COOLDOWN_DAYS = 10  # category streaks are cooled down before the shortlist is built
 # With weighted scoring (title/tags = 3 each, type = 2, desc = 1), a STRONG signal
 # means at least a title/tag-level hit plus a bit more — not just generic description
 # keywords. 4 requires e.g. a tag hit (3) + a description echo (1), or two field hits.
@@ -262,6 +265,21 @@ def theme_score(product: dict, themes: list[str]) -> int:
     return weighted_theme_score(product, themes)
 
 
+def _normalize_theme_key(value: str | None) -> str:
+    if not value:
+        return ""
+    text = re.sub(r"[^a-z0-9]+", " ", str(value).lower())
+    return " ".join(text.split())
+
+
+def _product_matches_theme(product: dict, theme: str) -> bool:
+    key = _normalize_theme_key(theme)
+    if not key:
+        return False
+    haystack = _haystack(product)
+    return key in haystack
+
+
 def strong_holiday_affinity(product: dict, today: dt.date) -> str | None:
     """If the product STRONGLY matches an approaching holiday, return that holiday's
     label; else None. Used to keep e.g. a Father's Day keychain from being posted
@@ -301,22 +319,46 @@ def candidate_tiers(products: list[dict], recent_handles: set[str],
     today = today or dt.date.today()
     rng = rng or random.Random()
     tiers: list[Selection] = []
+    recent_types, recent_themes = postlog.recent_category_signals(today=today)
 
-    def fresh_only(prods: list[dict], reserve_check: bool = False) -> list[dict]:
+    def fresh_only(prods: list[dict], themes: list[str] | None = None,
+                   reserve_check: bool = False) -> list[dict]:
         out = []
         for p in prods:
             if p.get("handle") in recent_handles:
                 continue
             if reserve_check and strong_holiday_affinity(p, today):
                 continue
+            ptype = _normalize_theme_key(p.get("type") or p.get("product_type"))
+            if ptype and ptype in recent_types:
+                continue
+            if themes:
+                theme_hits = {_normalize_theme_key(t) for t in themes if _normalize_theme_key(t)}
+                if any(theme in recent_themes for theme in theme_hits if _product_matches_theme(p, theme)):
+                    continue
             out.append(p)
-        return out
+        if out or not themes:
+            return out
+        # Fallback: if the category cooldown removes everything in a tier, relax to
+        # "avoid only backward same-theme repeats" so the tier still has a chance to
+        # choose a product rather than hard-failing the run.
+        relaxed = []
+        for p in prods:
+            if p.get("handle") in recent_handles:
+                continue
+            if reserve_check and strong_holiday_affinity(p, today):
+                continue
+            theme_hits = {_normalize_theme_key(t) for t in themes if _normalize_theme_key(t)}
+            if any(theme in recent_themes for theme in theme_hits if _product_matches_theme(p, theme)):
+                continue
+            relaxed.append(p)
+        return relaxed
 
     # Tier 1a — imminent special day
     day = upcoming_special_day(today)
     if day:
         label, themes = day
-        cands = fresh_only(match_products(products, themes))
+        cands = fresh_only(match_products(products, themes), themes=themes)
         if cands:
             tiers.append(Selection(cands[0], 1, f"Upcoming special day: {label}",
                                    themes, shortlist=cands[:SHORTLIST_SIZE],
@@ -327,6 +369,7 @@ def candidate_tiers(products: list[dict], recent_handles: set[str],
         scored = match_products_scored(products, themes)
         strong = [p for p, s in scored
                   if s >= STRONG_MATCH_MIN and p.get("handle") not in recent_handles]
+        strong = fresh_only(strong, themes=themes)
         if strong:
             tiers.append(Selection(strong[0], 1, f"Approaching special day: {label}",
                                    themes, shortlist=strong[:SHORTLIST_SIZE],
@@ -335,14 +378,14 @@ def candidate_tiers(products: list[dict], recent_handles: set[str],
 
     # Tier 2 — special month
     mlabel, mthemes = month_theme(today)
-    mcands = fresh_only(match_products(products, mthemes), reserve_check=True)
+    mcands = fresh_only(match_products(products, mthemes), themes=mthemes, reserve_check=True)
     if mcands:
         tiers.append(Selection(mcands[0], 2, f"Special month: {mlabel}", mthemes,
                                shortlist=mcands[:SHORTLIST_SIZE], is_occasion=True))
 
     # Tier 3 — season (broad; a genuine fit is easy, auto-accept allowed)
     slabel, sthemes = season_theme(today)
-    scands = fresh_only(match_products(products, sthemes), reserve_check=True)
+    scands = fresh_only(match_products(products, sthemes), themes=sthemes, reserve_check=True)
     if scands:
         tiers.append(Selection(scands[0], 3, f"Seasonal fit: {slabel}", sthemes,
                                shortlist=scands[:SHORTLIST_SIZE], is_occasion=False))
@@ -350,7 +393,7 @@ def candidate_tiers(products: list[dict], recent_handles: set[str],
     # Tier 4 — random evergreen (broad category)
     for _ in range(len(EVERGREEN)):
         cat, themes = random_evergreen(rng)
-        ecands = fresh_only(match_products(products, themes), reserve_check=True)
+        ecands = fresh_only(match_products(products, themes), themes=themes, reserve_check=True)
         if ecands:
             tiers.append(Selection(ecands[0], 4, f"Random evergreen: {cat}", themes,
                                    shortlist=ecands[:SHORTLIST_SIZE], is_occasion=False))

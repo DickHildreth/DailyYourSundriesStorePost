@@ -86,11 +86,15 @@ Key mechanics:
   (3/3/2/1) so a product that merely mentions "gift" in its blurb doesn't get mis-claimed.
 - **Repeat avoidance**: `fresh_only()` drops handles posted in the last 14 days BEFORE the
   shortlist is built. Keyed on product handle.
+- **Category cooldown**: `CATEGORY_COOLDOWN_DAYS = 10` plus `postlog.recent_category_signals()`
+  suppresses product types and theme-cluster repeats before the shortlist is built. This stops
+  back-to-back camping or pet posts from saturating the feed while still allowing the run to
+  recover gracefully when a tier is dominated by a single category.
 - **Commemorative exclusion**: `COMMEMORATIVE_OBSERVANCES` (Juneteenth, Veterans Day,
   Memorial Day) are removed from ALL product-selling tiers — never used as a sales hook.
 
 Tuning levers (all in selection.py): `LOOKAHEAD_DAYS`, `APPROACHING_DAYS`,
-`STRONG_MATCH_MIN`, `COMMEMORATIVE_OBSERVANCES`, per-holiday theme keyword lists.
+`CATEGORY_COOLDOWN_DAYS`, `STRONG_MATCH_MIN`, `COMMEMORATIVE_OBSERVANCES`, per-holiday theme keyword lists.
 
 ## Hard-won lessons (do not regress these)
 
@@ -140,21 +144,44 @@ These were real failures during development. Each fix exists for a reason.
   the confirmation flow in an incognito window (the in-app button errored on a stale
   session). Durable mitigations: complete **Business Verification** in the Security Center;
   optionally add **time jitter** (post within a 9–11 AM window, not exactly 09:00:00) and/or
-  a startup grace period so the app ages before automating. These are not yet implemented.
+  a startup grace period so the app ages before automating. The job now adds randomized
+  0–90 minute delay on posting days, plus weekly skip-day variation to reduce automation signals.
+- **Reach suppression**: recent posts publish successfully with real Facebook post IDs and appear
+  in Meta Business Suite, but many do not appear on the public page timeline. This is consistent
+  with Meta's soft throttling/distribution controls against repetitive content and a machine-like
+  cadence on a young page. The project is now reducing repeat themes, category streaks, and fixed
+  timestamps to lower automation signals, but reach recovery is not guaranteed and Facebook controls
+  the timeline distribution.
 
 ## Running / testing
 
 ```bash
 python -m app.test_selection    # unit tests, no network
 python -m app.verify_setup      # credential + container-time check, no posting
-python -m app.main --dry-run    # full pipeline incl. Claude selection + copy, no publish
-python -m app.main              # real: publishes + logs
+python -m app.main --dry-run --force    # full pipeline incl. Claude selection + copy, no publish
+python -m app.main --force      # real: publishes + logs, bypasses skip-day gate
+python -m app.main              # runtime decides whether today is a posting day
 python -m app.main --skip-preflight   # bypass credential checks
 python -m app.verify_setup --quiet    # only prints on failure
 ```
 
 Always run `--dry-run` after changing selection or the voice prompt, and eyeball the copy —
 especially in the days before a major holiday, given live unreviewed posting.
+
+## Auto-post scheduling and cadence features
+
+- **Random 4–5 posting days per week**: `should_post_today()` in `app/main.py` uses a deterministic
+  per-week RNG keyed by ISO week start plus a stable salt, so each week varies without flipping on
+  reruns of the same day. Skip days exit 0 with a log line instead of behaving like failures.
+- **Post-time jitter**: posting days sleep a random 0–90 minutes before publish unless `--dry-run`
+  or `--force` is used; delay is logged for visibility.
+- **Extended log schema**: `postlog.append()` now writes `product_type` and `theme` alongside the
+  existing `date, handle, title, tier`. Old log lines without those keys are still readable and treated
+  as unknown for cooldown matching.
+- **Scheduled trigger wiring**: the live container remains idle with `ENTRYPOINT ["sleep","infinity"]`.
+  In Coolify, add a Scheduled Task for `python -m app.main` using cron such as `0 15 * * *` and verify
+  the scheduler timezone; the app may self-skip most days but should still run daily. Because the scheduler
+  and container can be in different timezones, the actual local posting time must be checked after deployment.
 
 ## Conventions
 

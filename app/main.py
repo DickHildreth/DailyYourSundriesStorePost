@@ -11,15 +11,44 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import random
 import sys
 
 from . import catalog, copywriter, postlog, publisher
 from .selection import candidate_tiers as choose_tiers
 from .verify_setup import verify_all
 
+MAX_JITTER_MINUTES = 90
+
 
 def log(msg: str) -> None:
     print(f"[{dt.datetime.now().isoformat(timespec='seconds')}] {msg}", flush=True)
+
+
+def should_post_today(today: dt.date | None = None, salt: str = "sundries-posting") -> bool:
+    """Deterministic 4–5 posting days per ISO week.
+
+    We hash the ISO week start plus a stored salt to generate a per-week RNG. That keeps
+    the same date stable across reruns, while the pattern rotates each week so the skip days
+    vary instead of always falling on the same weekdays.
+    """
+    today = today or dt.date.today()
+    iso_year, iso_week, _ = today.isocalendar()
+    week_start = dt.date.fromisocalendar(iso_year, iso_week, 1)
+    rng = random.Random(f"{week_start.isoformat()}|{salt}")
+    weekdays = list(range(7))
+    post_days = set(rng.sample(weekdays, k=rng.choice([4, 5])))
+    return today.weekday() in post_days
+
+
+def apply_jitter(force: bool = False, dry_run: bool = False) -> None:
+    if force or dry_run:
+        log("Jitter: skipped (--dry-run or --force).")
+        return
+    minutes = random.randint(0, MAX_JITTER_MINUTES)
+    log(f"Jitter: sleeping {minutes} minute(s) before publish.")
+    import time
+    time.sleep(minutes * 60)
 
 
 def preflight() -> bool:
@@ -31,11 +60,17 @@ def preflight() -> bool:
     return ok
 
 
-def run(dry_run: bool = False, skip_preflight: bool = False) -> int:
+def run(dry_run: bool = False, skip_preflight: bool = False, force: bool = False) -> int:
+    if not force and not should_post_today():
+        log("Skip day — not posting today")
+        return 0
+
     if not skip_preflight:
         if not preflight():
             log("ERROR: pre-flight checks failed; not posting.")
             return 1
+
+    apply_jitter(force=force, dry_run=dry_run)
 
     log("Fetching catalog...")
     products = catalog.fetch_catalog()
@@ -88,7 +123,13 @@ def run(dry_run: bool = False, skip_preflight: bool = False) -> int:
     post_id = result.get("id") or result.get("post_id")
     log(f"Published. Post ID: {post_id}")
 
-    postlog.append(chosen["handle"], chosen["title"], chosen_tier)
+    postlog.append(
+        chosen["handle"],
+        chosen["title"],
+        chosen_tier,
+        product_type=chosen.get("type") or chosen.get("product_type"),
+        theme=occasion,
+    )
     log("Logged. Done.")
     return 0
 
@@ -97,6 +138,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
                     help="select + write but do not publish or log")
+    ap.add_argument("--force", action="store_true",
+                    help="bypass the skip-day check for manual runs/testing")
     ap.add_argument("--skip-preflight", action="store_true",
                     help="skip credential checks before running")
     ap.add_argument("--verify-only", action="store_true",
@@ -106,7 +149,7 @@ def main() -> int:
         if args.verify_only:
             ok = preflight()
             return 0 if ok else 1
-        return run(dry_run=args.dry_run, skip_preflight=args.skip_preflight)
+        return run(dry_run=args.dry_run, skip_preflight=args.skip_preflight, force=args.force)
     except Exception as e:  # fail loudly with non-zero exit for the scheduler
         log(f"ERROR: {e}")
         return 1

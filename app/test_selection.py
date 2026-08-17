@@ -2,6 +2,8 @@
 import datetime as dt
 import random
 
+from . import postlog
+from .main import should_post_today
 from .selection import (
     _nth_weekday, _last_weekday, _easter, upcoming_special_day,
     choose_product, match_products,
@@ -88,6 +90,19 @@ def main():
     # and does NOT flag the unrelated blanket
     aff2 = strong_holiday_affinity(PRODUCTS[3], june5)
     check("Affinity: blanket has no approaching-holiday affinity", aff2 is None)
+
+    # Category cooldown: recent posted categories must be tracked and treated as a skip.
+    sample_date = dt.date(2026, 6, 1)
+    postlog.append("camp-1", "Camp lantern", 1, today=sample_date, product_type="Camping", theme="camping")
+    postlog.append("camp-2", "Camp chair", 1, today=sample_date, product_type="Camping", theme="camping")
+    recent_types, recent_themes = postlog.recent_category_signals(today=sample_date)
+    check("Recent category signals include Camping", "camping" in recent_types and "camping" in recent_themes)
+
+    # Weekly posting-day logic should be deterministic and produce 4-5 posting days a week.
+    sample_week = [dt.date(2026, 1, 5) + dt.timedelta(days=i) for i in range(7)]
+    count = sum(1 for d in sample_week if should_post_today(d, salt="test-salt"))
+    check("Weekly posting schedule yields 4-5 posting days", 4 <= count <= 5)
+    check("Posting-day decision is stable on repeated calls", should_post_today(sample_week[0], salt="test-salt") == should_post_today(sample_week[0], salt="test-salt"))
 
     print("\nAll selection tests passed.")
 
